@@ -1,269 +1,138 @@
-import asyncio
+
 import logging
 import os
-import random
-import time
-from html import escape
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, PollHandler, PollAnswerHandler, ContextTypes
 
-# --- Configuration & Dummy Questions (Same as before) ---
-QUIZ_NAME = "Advanced Test"
-QUESTIONS_PER_QUIZ = 5
-SECONDS_PER_QUESTION = 15
-POINTS_CORRECT = 100
-POINTS_WRONG_PENALTY = -25
-MAX_SPEED_BONUS = 50
-dummy_questions = [
-    {"id": "q1", "question": "भारत की राजधानी क्या है?", "options": ["मुंबई", "नई दिल्ली", "चेन्नई", "कोलकाता"], "correct_option_id": 1},
-    {"id": "q2", "question": "Python में लिस्ट बनाने के लिए किस ब्रैकेट का उपयोग किया जाता है?", "options": ["{}", "()", "[]", "<>"], "correct_option_id": 2},
-    {"id": "q3", "question": "सूर्य किस दिशा में उगता है?", "options": ["पश्चिम", "उत्तर", "पूर्व", "दक्षिण"], "correct_option_id": 2},
-    {"id": "q4", "question": "1 KB में कितने बाइट्स होते हैं?", "options": ["1000", "1024", "2048", "512"], "correct_option_id": 1},
-    {"id": "q5", "question": "इनमें से कौन सा एक सर्च इंजन नहीं है?", "options": ["Google", "Yahoo", "Instagram", "Bing"], "correct_option_id": 2}
-]
+# Import our custom modules
+from quiz_manager import get_quiz_set, get_all_sets
+from play_quiz import QuizSession
+from user_quiz_data import format_detailed_review
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Helper Functions (Same as before) ---
-def get_question_by_id(qid):
-    return next((q for q in dummy_questions if q["id"] == qid), None)
-def calculate_points(time_taken):
-    if time_taken < 2: return MAX_SPEED_BONUS
-    if time_taken >= SECONDS_PER_QUESTION: return 0
-    bonus = MAX_SPEED_BONUS * (1 - (time_taken / SECONDS_PER_QUESTION))
-    return int(bonus)
+# This dictionary will hold active quiz sessions, with chat_id as the key.
+# This allows the bot to handle multiple users playing at the same time.
+ACTIVE_SESSIONS = {}
 
-# --- Core Bot Functions ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.clear()
-    keyboard = [[InlineKeyboardButton("✅ I'm ready!", callback_data='start_quiz')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    """Handles the /start command by showing a menu of available quizzes."""
+    quiz_sets = get_all_sets()
+    keyboard = []
+    row = []
+    for set_id, data in quiz_sets.items():
+        row.append(InlineKeyboardButton(data['name'], callback_data=f'start_quiz:{set_id}'))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    
     message_entity = update.message or update.callback_query.message
     await message_entity.reply_text(
-        f"🎲 Welcome to the '<b>{QUIZ_NAME}</b>'!\n\nPress the button when you are ready to start!",
-        reply_markup=reply_markup, parse_mode='HTML'
+        "🎲 Welcome to the Quiz Bot! 🎲\n\nPlease select a quiz to start:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles all button clicks and directs them to the correct action."""
     query = update.callback_query
     await query.answer()
-    data = query.data
+    data = query.data.split(':', 1)
+    action = data[0]
     chat_id = update.effective_chat.id
-    user_data = context.user_data
 
-    if data == 'start_quiz':
-        await query.edit_message_text(text="🚀 Getting the quiz ready...")
-        shuffled_questions = random.sample(dummy_questions, k=QUESTIONS_PER_QUIZ)
-        user_data.update({
-            'questions_queue': [q['id'] for q in shuffled_questions], 'results': [],
-            'total_score': 0, 'quiz_start_time': time.time(), 'active_poll_message_id': None,
-            'active_poll_id': None, 'score_message_id': None, 'review_messages': []
-        })
-        await start_countdown_and_quiz(chat_id, context)
+    if action == 'start_quiz' or action == 'try_again':
+        set_id = data[1]
+        quiz_data = get_quiz_set(set_id)
+        if not quiz_data:
+            await query.message.reply_text("<b>Error:</b> Requested quiz bank not available.", parse_mode='HTML')
+            return
+
+        # Clean up previous messages
+        if action == 'try_again':
+            try: await query.message.delete()
+            except BadRequest: pass
+            await context.bot.send_message(chat_id, text=f"🚀 Getting the '<b>{quiz_data['name']}</b>' quiz ready...")
+        else:
+            await query.edit_message_text(text=f"🚀 Getting the '<b>{quiz_data['name']}</b>' quiz ready...")
+
+        # Create and start a new game session
+        session = QuizSession(context, chat_id, set_id, quiz_data)
+        ACTIVE_SESSIONS[chat_id] = session
+        await session.start()
     
-    elif data in ['postpone_question', 'skip_permanently', 'stop_quiz']:
-        active_poll_id = user_data.get('active_poll_id')
-        if active_poll_id in context.bot_data:
-            quiz_info = context.bot_data.pop(active_poll_id, None)
+    elif action == 'detailed_review':
+        session_id = data[1]
+        try:
+            with open(f"results/{session_id}.json", "r") as f:
+                stored_data = json.load(f)
+        except FileNotFoundError:
+            await context.bot.send_message(chat_id, "⚠️ The data for this quiz has expired and is no longer available.")
+            return
+
+        # Ask the "Artist" to format the review
+        message_chunks = format_detailed_review(stored_data['results'], stored_data['quiz_name'], stored_data['questions_data'])
+        for chunk in message_chunks:
+            await context.bot.send_message(chat_id, text=chunk, parse_mode='HTML')
+            await asyncio.sleep(0.5)
+
+    elif action in ['postpone_question', 'skip_permanently', 'stop_quiz']:
+        session = ACTIVE_SESSIONS.get(chat_id)
+        # Check if there is an active session and if the poll belongs to it
+        if session and session.active_poll_id in context.bot_data:
+            quiz_info = context.bot_data.pop(session.active_poll_id, None)
             if not quiz_info: return
-            stopped_by_user = (data == 'stop_quiz')
-            if data == 'postpone_question': quiz_info['postponed'] = True
-            elif data == 'skip_permanently': quiz_info['skipped'] = True
-            await handle_poll_closure(chat_id, context, quiz_info, stopped=stopped_by_user)
-
-    elif data == 'try_again':
-        try: await query.message.delete()
-        except BadRequest: pass
-        await start_command(update, context)
-    
-    elif data == 'detailed_review':
-        user_data['score_message_id'] = query.message.message_id
-        await detailed_review_callback(update, context)
-    
-    elif data == 'close_review':
-        # New Feature: Close review and show score screen again
-        for msg_id in user_data.get('review_messages', []):
-            try: await context.bot.delete_message(chat_id, msg_id)
-            except BadRequest: pass
-        await show_final_score(chat_id, context, is_overview=False, from_review=True)
-
-
-async def detailed_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user_data = context.user_data
-    results = user_data.get('results', [])
-
-    if not results:
-        await context.bot.send_message(chat_id, "No answers to review.")
-        return
-    
-    try: await update.callback_query.message.delete()
-    except BadRequest: pass
-    
-    user_data['review_messages'] = []
-    message_chunks = []
-    current_chunk = "📝 ║  <b>𝐃𝐄𝐓𝐀𝐈𝐋𝐄𝐃 𝐑𝐄𝐕𝐈𝐄𝐖</b>  ║ 📝\n\n"
-    
-    for i, result in enumerate(results):
-        # ... (Formatting logic is the same)
-        question_data = get_question_by_id(result['question_id'])
-        escaped_question = escape(question_data['question'])
-        escaped_options = [escape(opt) for opt in question_data['options']]
-        options_text = ""
-        for j, option in enumerate(escaped_options):
-            label = ""
-            if j == result.get('answered_option_id') and j == question_data['correct_option_id']: label = "  ◅◅  <i>Your Answer (Correct)</i>"
-            elif j == result.get('answered_option_id'): label = "  ◅◅  <i>Your Answer</i>"
-            elif j == question_data['correct_option_id']: label = "  ◅◅  <i>Correct Answer</i>"
-            options_text += f"   ›  {option}{label}\n"
-        status_map = { 'correct': f"Sᴛᴀᴛᴜs: Cᴏʀʀᴇᴄᴛ ║ Pᴏɪɴᴛs: +{result['points_earned']} ║ Tɪᴍᴇ: {result['time_taken']:.1f}s", 'wrong': f"Sᴛᴀᴛᴜs: Wʀᴏɴɢ ║ Pᴏɪɴᴛs: {result['points_earned']} ║ Tɪᴍᴇ: {result['time_taken']:.1f}s", 'skipped': "Sᴛᴀᴛᴜs: Sᴋɪᴘᴘᴇᴅ ║ Pᴏɪɴᴛs: +0 ║ Tɪᴍᴇ: ---", 'timed_out': "Sᴛᴀᴛᴜs: Tɪᴍᴇ's Uᴘ ║ Pᴏɪɴᴛs: +0 ║ Tɪᴍᴇ: ---", 'stopped': "Sᴛᴀᴛᴜs: Sᴛᴏᴘᴘᴇᴅ ║ Pᴏɪɴᴛs: +0 ║ Tɪᴍᴇ: ---" }
-        result_text = status_map.get(result['status'], "")
-        question_review = ("____________________________________\n\n" f"❰ <b>𝐐𝐮𝐞𝐬𝐭𝐢𝐨𝐧 {i+1}</b> ❱\n{escaped_question}\n\n" f"{options_text}\n↳  {result_text}\n\n")
-        if len(current_chunk) + len(question_review) > 4000: message_chunks.append(current_chunk); current_chunk = ""
-        current_chunk += question_review
-    message_chunks.append(current_chunk)
-    
-    for chunk in message_chunks:
-        msg = await context.bot.send_message(chat_id, text=chunk, parse_mode='HTML'); await asyncio.sleep(0.5)
-        user_data['review_messages'].append(msg.message_id)
-
-    # New Feature: Add "Close Review" button
-    close_keyboard = [[InlineKeyboardButton("🔙 Close Review", callback_data='close_review')]]
-    msg = await context.bot.send_message(chat_id, " ", reply_markup=InlineKeyboardMarkup(close_keyboard))
-    user_data['review_messages'].append(msg.message_id)
-
-
-async def start_countdown_and_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = await context.bot.send_message(chat_id, text="Get Ready... 3️⃣")
-    await asyncio.sleep(1); await msg.edit_text("Get Ready... 2️⃣")
-    await asyncio.sleep(1); await msg.edit_text("Get Ready... 1️⃣")
-    await asyncio.sleep(1); await msg.edit_text("🚦 GO!")
-    await asyncio.sleep(0.5); await msg.delete()
-    await send_next_question(chat_id, context)
-
-
-async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_data = context.user_data
-
-    if not user_data.get('questions_queue'):
-        if user_data.get('active_poll_message_id'):
-            try: await context.bot.delete_message(chat_id, user_data['active_poll_message_id'])
-            except BadRequest: pass
-        await show_final_score(chat_id, context)
-        return
-
-    question_id = user_data['questions_queue'][0]
-    question_data = get_question_by_id(question_id)
-    total_answered = len(user_data.get('results', []))
-    is_postponed = user_data.get(f"is_postponed_{question_id}", False)
-    
-    keyboard = [[InlineKeyboardButton("⏹️ Stop Quiz", callback_data='stop_quiz')]]
-    if is_postponed: keyboard[0].append(InlineKeyboardButton("⏩ Skip Permanently", callback_data='skip_permanently'))
-    else: keyboard[0].append(InlineKeyboardButton("➡️ Postpone", callback_data='postpone_question'))
-
-    # UX FIX: "Pre-emptive Send" Logic
-    # 1. Start sending the new poll first
-    send_task = context.bot.send_poll(
-        chat_id=chat_id, question=f"Q {total_answered + 1}/{QUESTIONS_PER_QUIZ}: {question_data['question']}",
-        options=question_data["options"], type='quiz', correct_option_id=question_data["correct_option_id"],
-        open_period=SECONDS_PER_QUESTION, is_anonymous=False, reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    
-    # 2. Wait a tiny amount
-    await asyncio.sleep(0.015) # 15 milliseconds
-    
-    # 3. Then delete the old poll
-    if user_data.get('active_poll_message_id'):
-        try: await context.bot.delete_message(chat_id, user_data['active_poll_message_id'])
-        except BadRequest: pass
-    
-    # 4. Wait for the new poll message to be fully sent
-    message = await send_task
-
-    user_data['active_poll_message_id'] = message.message_id
-    user_data['active_poll_id'] = message.poll.id
-    context.bot_data[message.poll.id] = {
-        "chat_id": chat_id, "correct_option_id": question_data["correct_option_id"],
-        "question_id": question_id, "time_sent": time.time()
-    }
+            
+            stopped = (action == 'stop_quiz')
+            if action == 'postpone_question': quiz_info['postponed'] = True
+            elif action == 'skip_permanently': quiz_info['skipped'] = True
+            
+            await session.handle_closure(quiz_info, stopped=stopped)
+            if stopped:
+                ACTIVE_SESSIONS.pop(chat_id, None)
 
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    answer = update.poll_answer; poll_id = answer.poll_id
+    """Passes poll answers to the correct game session."""
+    poll_id = update.poll_answer.poll_id
     if poll_id in context.bot_data:
-        quiz_info = context.bot_data.pop(poll_id); chat_id = quiz_info["chat_id"]; user_data = context.user_data
-        
-        user_data['questions_queue'].pop(0)
-        time_taken = time.time() - quiz_info['time_sent']
-        is_correct = answer.option_ids[0] == quiz_info["correct_option_id"]
-        points = 0; status = ''
-        if is_correct: status = 'correct'; speed_bonus = calculate_points(time_taken); points = POINTS_CORRECT + speed_bonus
-        else: status = 'wrong'; points = POINTS_WRONG_PENALTY
-        user_data['total_score'] += points
-        user_data['results'].append({'question_id': quiz_info['question_id'], 'status': status, 'points_earned': points, 'time_taken': time_taken, 'answered_option_id': answer.option_ids[0]})
-        
-        await asyncio.sleep(0.7) # Precise delay
-        await send_next_question(chat_id, context)
+        session = context.bot_data[poll_id]['session']
+        await session.handle_answer(update)
+        # If the quiz is over, remove the session
+        if not session.questions_queue:
+            ACTIVE_SESSIONS.pop(session.chat_id, None)
 
 async def poll_timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Passes poll timeouts to the correct game session."""
     poll_id = update.poll.id
     if poll_id in context.bot_data and update.poll.is_closed:
+        session = context.bot_data[poll_id]['session']
         quiz_info = context.bot_data.pop(poll_id, None)
         if not quiz_info: return
-        chat_id = quiz_info["chat_id"]
-        await handle_poll_closure(chat_id, context, quiz_info)
-
-async def handle_poll_closure(chat_id, context, quiz_info, stopped=False):
-    user_data = context.user_data
-    question_id = user_data['questions_queue'].pop(0)
-    status = 'timed_out'
-    if quiz_info.get('postponed'):
-        user_data['questions_queue'].append(question_id); user_data[f"is_postponed_{question_id}"] = True; status = 'postponed'
-    elif quiz_info.get('skipped'): status = 'skipped'
-    elif stopped: status = 'stopped'
-    if status != 'postponed':
-        user_data['results'].append({'question_id': quiz_info['question_id'], 'status': status, 'points_earned': 0, 'time_taken': SECONDS_PER_QUESTION, 'answered_option_id': None})
-    if not user_data.get('questions_queue') or stopped:
-        await show_final_score(chat_id, context)
-    else:
-        await send_next_question(chat_id, context)
-
-
-async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE, is_overview: bool = False, from_review: bool = False) -> None:
-    user_data = context.user_data
-    if not user_data: return # Quiz data might be cleared, so exit gracefully
-    total_score = user_data.get('total_score', 0); results = user_data.get('results', [])
-    correct_count = sum(1 for r in results if r['status'] == 'correct'); wrong_count = sum(1 for r in results if r['status'] == 'wrong')
-    total_time_taken = sum(r['time_taken'] for r in results); total_quiz_time = QUESTIONS_PER_QUIZ * SECONDS_PER_QUESTION
-    answered_count = correct_count + wrong_count
-    accuracy = (correct_count / answered_count * 100) if answered_count > 0 else 0
-
-    if is_overview:
-        return # Overview is now part of the close button logic
-
-    score_text = (f"⫷ 🏆 <b>𝐅𝐈𝐍𝐀𝐋 𝐒𝐂𝐎𝐑𝐄 » {escape(QUIZ_NAME)}</b> 🏆 ⫸\n\n" f"    ✅ Correct       »  <code>{correct_count}</code>\n" f"    ❌ Wrong         »  <code>{wrong_count}</code>\n\n" f"    ✪ <b>Total Points</b>  »  <code>{total_score}</code>\n" f"....................................................\n" f"     📊 <b>𝕄𝕠𝕣𝕖 𝕀𝕟𝕗𝕠𝕣𝕞𝕒𝕥𝕚𝔬𝔫</b> 📊\n\n" f"    ⏳ Total Quiz Time   »  <code>{total_quiz_time}s</code>\n" f"    ⏱️ Your Time Taken   »  <code>{total_time_taken:.1f}s</code>\n" f"    ⇨ Time Saved        »  <code>{total_quiz_time - total_time_taken:.1f}s</code>")
-    
-    keyboard = [[InlineKeyboardButton("📊 Detailed Review", callback_data='detailed_review')], [InlineKeyboardButton("🔄      Try Again      🔄", callback_data='try_again')]]
-    
-    # Feature: Don't re-send score if we're just closing the review
-    if from_review:
-        if user_data.get('score_message_id'):
-            try: await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=user_data['score_message_id'], reply_markup=InlineKeyboardMarkup(keyboard))
-            except BadRequest: pass # If original score message was deleted, just ignore
-        return
-
-    msg = await context.bot.send_message(chat_id, text=score_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-    user_data['score_message_id'] = msg.message_id
-
+        await session.handle_closure(quiz_info)
+        # If the quiz is over, remove the session
+        if not session.questions_queue:
+            ACTIVE_SESSIONS.pop(session.chat_id, None)
 
 def main() -> None:
+    """Initializes and runs the bot."""
     TOKEN = os.getenv("TOKEN")
-    if not TOKEN: raise ValueError("TOKEN environment variable not set!")
+    if not TOKEN:
+        raise ValueError("TOKEN environment variable not set! Please set it in Render's environment variables.")
+    
     application = Application.builder().token(TOKEN).build()
+
+    # Register all the handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(PollAnswerHandler(poll_answer_handler))
     application.add_handler(PollHandler(poll_timeout_handler))
+
+    # Start the bot
+    print("Bot is running...")
     application.run_polling()
 
 if __name__ == '__main__':
