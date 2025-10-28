@@ -107,11 +107,10 @@ class QuizSession:
 
         self.active_poll_message_id = message.message_id
         self.active_poll_id = message.poll.id
-        self.context.bot_data[message.poll.id] = {"session": self, "time_sent": time.time()}
+        self.context.bot_data[message.poll.id] = {"session": self, "time_sent": time.time(), "question_id": question_id}
 
     async def handle_answer(self, update: Update):
         """Processes a user's answer from a poll."""
-        # The session now removes its own data from the central bot_data
         quiz_info = self.context.bot_data.pop(self.active_poll_id, None)
         if not quiz_info: return
         
@@ -137,34 +136,35 @@ class QuizSession:
         await asyncio.sleep(0.7)
         await self.send_next_question()
 
-    async def handle_closure(self, stopped=False, postponed=False, skipped=False):
+    async def handle_closure(self, poll_id: str, stopped=False, postponed=False, skipped=False):
         """Handles any poll closure (timeout, postpone, skip, stop)."""
-        # The session now removes its own data from the central bot_data
-        quiz_info = self.context.bot_data.pop(self.active_poll_id, None)
+        quiz_info = self.context.bot_data.pop(poll_id, None)
         if not quiz_info: return
-        
-        question_id = self.questions_queue.pop(0)
-        status = 'timed_out'
-        
-        if postponed:
-            self.questions_queue.append(question_id)
-            setattr(self, f"is_postponed_{question_id}", True)
-            status = 'postponed'
-        elif skipped:
-            status = 'skipped'
-        elif stopped:
-            status = 'stopped'
-        
-        if status != 'postponed':
-            self.results.append({
-                'question_id': question_id, 'status': status, 'points_earned': 0,
-                'time_taken': SECONDS_PER_QUESTION, 'answered_option_id': None
-            })
-        
-        if not self.questions_queue or stopped:
-            await self.show_final_score()
-        else:
-            await self.send_next_question()
+
+        # This check prevents race conditions. We only process the closure if the question is still in the queue.
+        if self.questions_queue and quiz_info.get("question_id") == self.questions_queue[0]:
+            question_id = self.questions_queue.pop(0)
+            status = 'timed_out'
+            
+            if postponed:
+                self.questions_queue.append(question_id)
+                setattr(self, f"is_postponed_{question_id}", True)
+                status = 'postponed'
+            elif skipped:
+                status = 'skipped'
+            elif stopped:
+                status = 'stopped'
+            
+            if status != 'postponed':
+                self.results.append({
+                    'question_id': question_id, 'status': status, 'points_earned': 0,
+                    'time_taken': SECONDS_PER_QUESTION, 'answered_option_id': None
+                })
+            
+            if not self.questions_queue or stopped:
+                await self.show_final_score()
+            else:
+                await self.send_next_question()
     
     async def show_final_score(self):
         """Calculates final score, saves results to JSON, and sends the score message."""
