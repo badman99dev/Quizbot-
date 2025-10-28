@@ -9,9 +9,6 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 import logging
 
-# We don't need to import get_quiz_set here as it's handled by bot.py
-# from quiz_manager import get_quiz_set
-
 # --- Constants ---
 SECONDS_PER_QUESTION = 15
 POINTS_CORRECT = 100
@@ -48,7 +45,6 @@ class QuizSession:
 
     async def start(self):
         """Starts the quiz with a more robust and smooth countdown."""
-        # *** THE FIX IS HERE: More robust countdown logic ***
         try:
             msg = await self.context.bot.send_message(self.chat_id, text="Get Ready... 3️⃣")
             await asyncio.sleep(1.1)
@@ -60,8 +56,6 @@ class QuizSession:
             await asyncio.sleep(0.5)
             await msg.delete()
         except BadRequest as e:
-            # If the user stops the bot or something unexpected happens during the countdown,
-            # we just log it and continue to the first question.
             logging.warning(f"Countdown message handling error: {e}")
 
         await self.send_next_question()
@@ -117,8 +111,12 @@ class QuizSession:
 
     async def handle_answer(self, update: Update):
         """Processes a user's answer from a poll."""
+        # The session now removes its own data from the central bot_data
+        quiz_info = self.context.bot_data.pop(self.active_poll_id, None)
+        if not quiz_info: return
+        
         answer = update.poll_answer
-        time_taken = time.time() - self.context.bot_data[answer.poll_id]['time_sent']
+        time_taken = time.time() - quiz_info['time_sent']
         
         question_id = self.questions_queue.pop(0)
         question_data = get_question_by_id_from_data(question_id, self.questions_data)
@@ -139,14 +137,20 @@ class QuizSession:
         await asyncio.sleep(0.7)
         await self.send_next_question()
 
-    async def handle_closure(self, quiz_info, stopped=False):
+    async def handle_closure(self, stopped=False, postponed=False, skipped=False):
         """Handles any poll closure (timeout, postpone, skip, stop)."""
+        # The session now removes its own data from the central bot_data
+        quiz_info = self.context.bot_data.pop(self.active_poll_id, None)
+        if not quiz_info: return
+        
         question_id = self.questions_queue.pop(0)
         status = 'timed_out'
         
-        if quiz_info.get('postponed'):
-            self.questions_queue.append(question_id); setattr(self, f"is_postponed_{question_id}", True); status = 'postponed'
-        elif quiz_info.get('skipped'):
+        if postponed:
+            self.questions_queue.append(question_id)
+            setattr(self, f"is_postponed_{question_id}", True)
+            status = 'postponed'
+        elif skipped:
             status = 'skipped'
         elif stopped:
             status = 'stopped'
