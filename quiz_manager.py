@@ -1,36 +1,69 @@
 # quiz_manager.py
+import os
+from supabase import create_client, Client
 
-"""
-This module acts as the central library for all quiz data.
-Its only job is to store and provide quiz sets.
-"""
+# --- Database Connection ---
+url: str = os.environ.get("SUPABASE_URL")
+key: str = os.environ.get("SUPABASE_KEY")
+supabase: Client = None
+if url and key:
+    supabase = create_client(url, key)
+else:
+    print("⚠️ WARNING: SUPABASE_URL or SUPABASE_KEY not found.")
 
-QUIZ_SETS = {
-    "set_1_general_knowledge": {
-        "name": "General Knowledge 🧠",
-        "questions": [
-            {"id": "q1", "question": "भारत की राजधानी क्या है?", "options": ["मुंबई", "नई दिल्ली", "चेन्नई", "कोलकाता"], "correct_option_id": 1},
-            {"id": "q2", "question": "Python में लिस्ट बनाने के लिए किस ब्रैकेट का उपयोग किया जाता है?", "options": ["{}", "()", "[]", "<>"], "correct_option_id": 2},
-            {"id": "q3", "question": "सूर्य किस दिशा में उगता है?", "options": ["पश्चिम", "उत्तर", "पूर्व", "दक्षिण"], "correct_option_id": 2},
-            {"id": "q4", "question": "1 KB में कितने बाइट्स होते हैं?", "options": ["1000", "1024", "2048", "512"], "correct_option_id": 1},
-            {"id": "q5", "question": "इनमें से कौन सा एक सर्च इंजन नहीं है?", "options": ["Google", "Yahoo", "Instagram", "Bing"], "correct_option_id": 2}
-        ]
-    },
-    "set_2_science": {
-        "name": "Science Challenge 🧪",
-        "questions": [
-            {"id": "s1", "question": "What is the chemical formula for water?", "options": ["O2", "H2O", "CO2", "NaCl"], "correct_option_id": 1},
-            {"id": "s2", "question": "How many bones are in the human body?", "options": ["206", "300", "150", "256"], "correct_option_id": 0},
-        ]
-    }
-    # Future quizzes can be added here
-    # "set_3_movies": { ... }
-}
+# यह हमारी मेमोरी (कैश) है, जो शुरू में खाली होगी
+QUIZ_CACHE = {}
 
 def get_quiz_set(set_id: str):
-    """Returns the quiz data (name and questions) for a given set_id."""
-    return QUIZ_SETS.get(set_id)
+    """
+    "स्मार्ट" फंक्शन: पहले कैश में खोजता है, अगर नहीं मिला तो Supabase में खोजता है।
+    """
+    # 1. पहले कैश में देखो
+    if set_id in QUIZ_CACHE:
+        print(f"✅ Found '{set_id}' in cache.")
+        return QUIZ_CACHE[set_id]
+
+    # 2. अगर कैश में नहीं मिला, तो Supabase में खोजो
+    if not supabase:
+        return None
+
+    print(f"🟡 '{set_id}' not in cache. Searching in Supabase...")
+    try:
+        response = supabase.table('quizzes').select('name', 'questions').eq('set_id', set_id).single().execute()
+        
+        if response.data:
+            print(f"👍 Found '{set_id}' in Supabase. Adding to cache.")
+            # 3. Supabase में मिल गया, तो उसे कैश में सेव कर लो
+            QUIZ_CACHE[set_id] = response.data
+            return response.data
+        else:
+            # 4. कहीं नहीं मिला
+            print(f"❌ '{set_id}' not found anywhere.")
+            return None
+    except Exception as e:
+        print(f"Error fetching from Supabase: {e}")
+        return None
 
 def get_all_sets():
-    """Returns the entire dictionary of quiz sets to build the start menu."""
-    return QUIZ_SETS
+    """
+    यह फंक्शन सभी क्विज की लिस्ट लाता है ताकि स्टार्ट मेनू बन सके।
+    यह हमेशा Supabase से लेटेस्ट लिस्ट लाएगा।
+    """
+    if not supabase:
+        return {}
+        
+    try:
+        response = supabase.table('quizzes').select('set_id', 'name').execute()
+        if response.data:
+            # Supabase से मिली लिस्ट को सही फॉर्मेट में बदलो
+            all_sets = {item['set_id']: {'name': item['name']} for item in response.data}
+            # कैश को भी अपडेट कर दो
+            for set_id, data in all_sets.items():
+                if set_id not in QUIZ_CACHE:
+                    QUIZ_CACHE[set_id] = {}
+                QUIZ_CACHE[set_id]['name'] = data['name']
+            return all_sets
+        return {}
+    except Exception as e:
+        print(f"Error fetching all sets from Supabase: {e}")
+        return {}
