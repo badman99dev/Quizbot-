@@ -1,16 +1,15 @@
 import asyncio
 import logging
+import os  # <-- Step 1: os module को इम्पोर्ट किया
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, PollAnswerHandler, ContextTypes
 
 # --- कॉन्फ़िगरेशन ---
 QUIZ_NAME = "12th Test"
-QUESTIONS_PER_QUIZ = 2  # तुम इसे dummy_questions की लंबाई तक बढ़ा सकते हो
+QUESTIONS_PER_QUIZ = 2
 SECONDS_PER_QUESTION = 15
 
 # --- डमी सवाल (Dummy Questions) ---
-# तुम यहाँ जितने चाहो उतने सवाल जोड़ सकते हो।
-# correct_option_id इंडेक्स 0 से शुरू होता है (0 मतलब पहला ऑप्शन, 1 मतलब दूसरा, etc.)
 dummy_questions = [
     {
         "question": "भारत की राजधानी क्या है?",
@@ -39,14 +38,9 @@ dummy_questions = [
     }
 ]
 
-# --- बॉट का लॉजिक ---
-
-# लॉगिंग सेटअप
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# --- बॉट का लॉजिक (यहाँ कोई बदलाव नहीं) ---
+# ... (ऊपर का सारा लॉजिक start_command से लेकर stop_command तक बिलकुल वैसा ही रहेगा) ...
+# ... (I'm skipping the middle part to keep this short, but you should use the full code from before) ...
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/start कमांड हैंडलर। क्विज़ शुरू करने का मैसेज भेजता है।"""
@@ -189,9 +183,12 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def main() -> None:
     """बॉट को शुरू करता है।"""
-    # अपने बॉट का टोकन यहाँ डालें
-    TOKEN = "8045438791:AAE4KoPRdQmDZ4qZNq4BzMWCEmAm-c6i-ik" # 👈 अपना टोकन यहाँ डालो!
+    # --- Step 2: टोकन को Environment Variable से लोड किया ---
+    TOKEN = os.getenv("TELEGRAM_TOKEN")
     
+    if not TOKEN:
+        raise ValueError("Error: TELEGRAM_TOKEN environment variable is not set!")
+
     application = Application.builder().token(TOKEN).build()
 
     # कमांड्स
