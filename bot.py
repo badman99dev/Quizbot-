@@ -190,7 +190,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 def main() -> None:
     """बॉट को शुरू करता है।"""
     # अपने बॉट का टोकन यहाँ डालें
-    TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE" # 👈 अपना टोकन यहाँ डालो!
+    TOKEN = "8045438791:AAE4KoPRdQmDZ4qZNq4BzMWCEmAm-c6i-ik" # 👈 अपना टोकन यहाँ डालो!
     
     application = Application.builder().token(TOKEN).build()
 
