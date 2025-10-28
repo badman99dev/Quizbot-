@@ -46,20 +46,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     keyboard = [[InlineKeyboardButton("✅ I'm ready!", callback_data='start_quiz')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"🎲 Welcome to the '{QUIZ_NAME}'!\n\nPress the button when you are ready to start!",
+        f"🎲 Welcome to the '<b>{QUIZ_NAME}</b>'!\n\nPress the button when you are ready to start!",
         reply_markup=reply_markup, parse_mode='HTML'
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
-    data = query.data.split(':')
-    action = data[0]
-    
+    await query.answer() # Always answer the callback immediately
+    data = query.data
     chat_id = update.effective_chat.id
     user_data = context.user_data
 
-    if action == 'start_quiz':
+    if data == 'start_quiz':
         await query.edit_message_text(text="🚀 Getting the quiz ready...")
         shuffled_questions = random.sample(dummy_questions, k=QUESTIONS_PER_QUIZ)
         user_data.update({
@@ -68,69 +66,71 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         })
         await start_countdown_and_quiz(chat_id, context)
     
-    elif action in ['postpone_question', 'skip_permanently', 'stop_quiz']:
+    elif data in ['postpone_question', 'skip_permanently', 'stop_quiz']:
         active_poll_id = user_data.get('active_poll_id')
         if active_poll_id in context.bot_data:
             quiz_info = context.bot_data.pop(active_poll_id, None)
             if not quiz_info: return
             
-            if action == 'postpone_question': quiz_info['postponed'] = True
-            elif action == 'skip_permanently': quiz_info['skipped'] = True
-            elif action == 'stop_quiz':
-                await query.message.delete()
-                await show_final_score(chat_id, context)
+            if data == 'postpone_question': quiz_info['postponed'] = True
+            elif data == 'skip_permanently': quiz_info['skipped'] = True
+            elif data == 'stop_quiz':
+                await handle_poll_closure(chat_id, context, quiz_info, stopped=True)
                 return
             await handle_poll_closure(chat_id, context, quiz_info)
 
-    elif action == 'try_again':
-        await query.message.delete()
+    elif data == 'try_again':
+        # BUG FIX: Properly handles the "Try Again" action
+        # Delete the score and review messages if they exist
+        if 'score_message_id' in user_data:
+            try: await context.bot.delete_message(chat_id, user_data['score_message_id'])
+            except BadRequest: pass
+        await query.message.delete() # Deletes the message with the button
         await start_command(update.effective_message, context)
     
-    elif action == 'detailed_review':
+    elif data == 'detailed_review':
+        user_data['score_message_id'] = query.message.message_id
         await detailed_review_callback(update, context)
 
 
 async def detailed_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
     chat_id = update.effective_chat.id
     user_data = context.user_data
     results = user_data.get('results', [])
 
     if not results:
-        await query.message.reply_text("No answers to review.")
+        await context.bot.send_message(chat_id, "No answers to review.")
         return
-
-    await query.message.delete()
     
     message_chunks = []
     current_chunk = "📝 ║  <b>𝐃𝐄𝐓𝐀𝐈𝐋𝐄𝐃 𝐑𝐄𝐕𝐈𝐄𝐖</b>  ║ 📝\n\n"
     
     for i, result in enumerate(results):
         question_data = get_question_by_id(result['question_id'])
-        
         options_text = ""
         for j, option in enumerate(question_data['options']):
-            if j == question_data['correct_option_id']:
-                options_text += f"    ✅ <code>{option}</code>\n"
+            label = ""
+            if j == result.get('answered_option_id') and j == question_data['correct_option_id']:
+                label = "  ◅◅  <i>Your Answer (Correct)</i>"
             elif j == result.get('answered_option_id'):
-                options_text += f"    ❌ <code>{option}</code> <i>(Your answer)</i>\n"
-            else:
-                options_text += f"    -  <code>{option}</code>\n"
+                label = "  ◅◅  <i>Your Answer</i>"
+            elif j == question_data['correct_option_id']:
+                label = "  ◅◅  <i>Correct Answer</i>"
+            options_text += f"   ›  {option}{label}\n"
 
-        result_text = ""
-        if result['status'] == 'correct':
-            result_text = f"Status: ✅ Correct﹞﹝Points: +{result['points_earned']}﹞﹝Time: {result['time_taken']:.1f}s"
-        elif result['status'] == 'wrong':
-            result_text = f"Status: ❌ Wrong﹞﹝Points: {result['points_earned']}﹞﹝Time: {result['time_taken']:.1f}s"
-        else:
-            result_text = f"Status: ⌛ Not Answered﹞﹝Points: +0﹞﹝Time: ---"
+        status_map = {
+            'correct': f"Sᴛᴀᴛᴜs: Cᴏʀʀᴇᴄᴛ ║ Pᴏɪɴᴛs: +{result['points_earned']} ║ Tɪᴍᴇ: {result['time_taken']:.1f}s",
+            'wrong': f"Sᴛᴀᴛᴜs: Wʀᴏɴɢ ║ Pᴏɪɴᴛs: {result['points_earned']} ║ Tɪᴍᴇ: {result['time_taken']:.1f}s",
+            'skipped': "Sᴛᴀᴛᴜs: Sᴋɪᴘᴘᴇᴅ ║ Pᴏɪɴᴛs: +0 ║ Tɪᴍᴇ: ---",
+            'timed_out': "Sᴛᴀᴛᴜs: Tɪᴍᴇ's Uᴘ ║ Pᴏɪɴᴛs: +0 ║ Tɪᴍᴇ: ---",
+            'postponed': "Sᴛᴀᴛᴜs: Pᴏsᴛᴘᴏɴᴇᴅ ║ Pᴏɪɴᴛs: +0 ║ Tɪᴍᴇ: ---"
+        }
+        result_text = status_map.get(result['status'], "")
 
         question_review = (
             "____________________________________\n\n"
-            f"❰ <b>𝐐𝐮𝐞𝐬𝐭𝐢𝐨𝐧 {i+1}</b> ❱\n"
-            f"<code>{question_data['question']}</code>\n\n"
-            f"{options_text}\n"
-            f"↳  <i>﹝{result_text}﹞</i>\n\n"
+            f"❰ <b>𝐐𝐮𝐞𝐬𝐭𝐢𝐨𝐧 {i+1}</b> ❱\n{question_data['question']}\n\n"
+            f"{options_text}\n↳  {result_text}\n\n"
         )
         
         if len(current_chunk) + len(question_review) > 4000:
@@ -158,13 +158,14 @@ async def start_countdown_and_quiz(chat_id: int, context: ContextTypes.DEFAULT_T
 
 async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_data = context.user_data
-    if user_data.get('active_poll_message_id'):
-        try:
-            await context.bot.delete_message(chat_id, user_data['active_poll_message_id'])
-        except BadRequest: pass
-        user_data['active_poll_message_id'] = None
 
+    # UI/UX FIX: Seamless Transition using asyncio.gather
+    delete_task = None
+    if user_data.get('active_poll_message_id'):
+        delete_task = context.bot.delete_message(chat_id, user_data['active_poll_message_id'])
+    
     if not user_data.get('questions_queue'):
+        if delete_task: await delete_task # Ensure last message is deleted before score
         await show_final_score(chat_id, context)
         return
 
@@ -180,12 +181,17 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -
     else:
         keyboard[0].append(InlineKeyboardButton("➡️ Postpone", callback_data='postpone_question'))
 
-    message = await context.bot.send_poll(
+    send_task = context.bot.send_poll(
         chat_id=chat_id, question=f"Q {total_answered + 1}/{QUESTIONS_PER_QUIZ}: {question_data['question']}",
         options=question_data["options"], type='quiz', correct_option_id=question_data["correct_option_id"],
         open_period=SECONDS_PER_QUESTION, is_anonymous=False, reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    
+
+    if delete_task:
+        _, message = await asyncio.gather(delete_task, send_task)
+    else:
+        message = await send_task
+
     user_data['active_poll_message_id'] = message.message_id
     user_data['active_poll_id'] = message.poll.id
     context.bot_data[message.poll.id] = {
@@ -229,7 +235,7 @@ async def poll_timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         chat_id = quiz_info["chat_id"]
         await handle_poll_closure(chat_id, context, quiz_info)
 
-async def handle_poll_closure(chat_id, context, quiz_info):
+async def handle_poll_closure(chat_id, context, quiz_info, stopped=False):
     user_data = context.user_data
     question_id = user_data['questions_queue'].pop(0)
     
@@ -239,13 +245,21 @@ async def handle_poll_closure(chat_id, context, quiz_info):
         user_data[f"is_postponed_{question_id}"] = True; status = 'postponed'
     elif quiz_info.get('skipped'):
         status = 'skipped'
+    elif stopped:
+        status = 'stopped' # To not add points for the last question if quiz is stopped
     
-    user_data['results'].append({
-        'question_id': quiz_info['question_id'], 'status': status, 'points_earned': 0,
-        'time_taken': SECONDS_PER_QUESTION, 'answered_option_id': None
-    })
+    if status != 'postponed':
+        user_data['results'].append({
+            'question_id': quiz_info['question_id'], 'status': status, 'points_earned': 0,
+            'time_taken': SECONDS_PER_QUESTION, 'answered_option_id': None
+        })
     
-    await send_next_question(chat_id, context)
+    # BUG FIX: If this was the last question, show score
+    if not user_data['questions_queue']:
+        await show_final_score(chat_id, context)
+    else:
+        await send_next_question(chat_id, context)
+
 
 async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE, is_overview: bool = False) -> None:
     user_data = context.user_data
@@ -257,9 +271,8 @@ async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE, is_
     total_time_taken = sum(r['time_taken'] for r in results)
     total_quiz_time = QUESTIONS_PER_QUIZ * SECONDS_PER_QUESTION
     
-    accuracy = 0
-    if (correct_count + wrong_count) > 0:
-        accuracy = (correct_count / (correct_count + wrong_count)) * 100
+    answered_count = correct_count + wrong_count
+    accuracy = (correct_count / answered_count * 100) if answered_count > 0 else 0
 
     if is_overview:
         overview_text = (
@@ -269,22 +282,21 @@ async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE, is_
             f"Correct Answers »  <code>{correct_count}/{len(results)}</code>"
         )
         await context.bot.send_message(chat_id, text=overview_text, parse_mode='HTML')
-        # user_data.clear() # Don't clear here, allow trying again.
         return
 
     score_text = (
-        f"⫷ 🏆 <b>𝐅𝐈𝐍𝐀𝐋 𝐒𝐂𝐎𝐑𝐄</b> 🏆 ⫸\n\n"
+        f"⫷ 🏆 <b>𝐅𝐈𝐍𝐀𝐋 𝐒𝐂𝐎𝐑𝐄 » {QUIZ_NAME}</b> 🏆 ⫸\n\n"
         f"    ✅ Correct       »  <code>{correct_count}</code>\n"
         f"    ❌ Wrong         »  <code>{wrong_count}</code>\n\n"
         f"    ✪ <b>Total Points</b>  »  <code>{total_score}</code>\n"
         f"....................................................\n"
-        f"     📊 <b>𝕄𝕠𝕣𝕖 𝕀𝕟𝕗𝕠𝕣𝕞𝕒𝕥𝕚𝕠𝕟</b> 📊\n\n"
+        f"     📊 <b>𝕄𝕠𝕣𝕖 𝕀𝕟𝕗𝕠𝕣𝕞𝕒𝕥𝕚𝔬𝔫</b> 📊\n\n"
         f"    ⏳ Total Quiz Time   »  <code>{total_quiz_time}s</code>\n"
         f"    ⏱️ Your Time Taken   »  <code>{total_time_taken:.1f}s</code>\n"
         f"    ⇨ Time Saved        »  <code>{total_quiz_time - total_time_taken:.1f}s</code>"
     )
     
-    keyboard = [[InlineKeyboardButton("📊 Detailed Review Your Answers", callback_data='detailed_review')],
+    keyboard = [[InlineKeyboardButton("📊 Detailed Review", callback_data='detailed_review')],
                 [InlineKeyboardButton("🔄      Try Again      🔄", callback_data='try_again')]]
     
     await context.bot.send_message(
