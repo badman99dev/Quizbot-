@@ -73,22 +73,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await start_countdown_and_quiz(chat_id, context)
     
     elif data in ['postpone_question', 'skip_permanently', 'stop_quiz']:
-        if user_data.get('active_poll_message_id'):
-            try:
-                await context.bot.stop_poll(chat_id, user_data['active_poll_message_id'])
-                current_poll_id = user_data.get('active_poll_id')
-                if current_poll_id in context.bot_data:
-                    if data == 'postpone_question':
-                        context.bot_data[current_poll_id]['postponed'] = True
-                    elif data == 'skip_permanently':
-                        context.bot_data[current_poll_id]['skipped'] = True
-                    elif data == 'stop_quiz':
-                        context.bot_data[current_poll_id]['stopped'] = True
-                        await query.message.delete()
-                        await show_final_score(chat_id, context)
-            except BadRequest as e:
-                logger.warning(f"Could not stop poll (likely already closed): {e}")
-    
+        active_poll_id = user_data.get('active_poll_id')
+        if active_poll_id in context.bot_data:
+            # Manually trigger the timeout logic for the current poll
+            quiz_info = context.bot_data.pop(active_poll_id) # Important: pop it
+            if data == 'postpone_question': quiz_info['postponed'] = True
+            elif data == 'skip_permanently': quiz_info['skipped'] = True
+            elif data == 'stop_quiz': quiz_info['stopped'] = True
+            
+            await handle_poll_closure(chat_id, context, quiz_info)
+
     elif data == 'try_again':
         await query.message.delete()
         await start_command(update.effective_message, context)
@@ -105,13 +99,10 @@ async def start_countdown_and_quiz(chat_id: int, context: ContextTypes.DEFAULT_T
 async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_data = context.user_data
     
-    # --- FINAL WIPE/DELETE EFFECT ---
-    # Delete the previous question's poll message if it exists
     if user_data.get('active_poll_message_id'):
         try:
             await context.bot.delete_message(chat_id, user_data['active_poll_message_id'])
-        except BadRequest as e:
-            logger.info(f"Could not delete previous poll message (already deleted?): {e}")
+        except BadRequest: pass # Ignore if message not found
         user_data['active_poll_message_id'] = None
 
     if not user_data.get('questions_queue'):
@@ -132,8 +123,7 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -
         keyboard[0].append(InlineKeyboardButton("➡️ Postpone", callback_data='postpone_question'))
 
     message = await context.bot.send_poll(
-        chat_id=chat_id,
-        question=f"Question {current_q_num}/{QUESTIONS_PER_QUIZ}\n\n{question_data['question']}",
+        chat_id=chat_id, question=f"Q {current_q_num}/{QUESTIONS_PER_QUIZ}: {question_data['question']}",
         options=question_data["options"], type='quiz', correct_option_id=question_data["correct_option_id"],
         open_period=SECONDS_PER_QUESTION, is_anonymous=False, reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -145,62 +135,66 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -
         "question_id": question_id, "time_sent": time.time()
     }
 
-async def process_answered_poll(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str, is_correct: bool, time_taken: float):
-    user_data = context.user_data
-    chat_id = update.effective_chat.id
-    
-    user_data['questions_queue'].pop(0)
-    user_data['questions_answered'] += 1
-    
-    points = 0
-    if is_correct:
-        user_data['correct_answers'] += 1
-        speed_bonus = calculate_points(time_taken)
-        points = POINTS_CORRECT + speed_bonus
-        await context.bot.send_message(chat_id, f"✅ Correct! +{points} points (+{speed_bonus} speed bonus)", protect_content=True)
-    else:
-        user_data['wrong_answers'] += 1
-        points = POINTS_WRONG_PENALTY
-        await context.bot.send_message(chat_id, f"❌ Wrong! {points} points", protect_content=True)
-    
-    user_data['total_score'] += points
-    await asyncio.sleep(2)
-    await send_next_question(chat_id, context)
-
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     answer = update.poll_answer
     poll_id = answer.poll_id
 
     if poll_id in context.bot_data:
         quiz_info = context.bot_data.pop(poll_id)
+        user_data = context.user_data
+        
+        # ** THE FIX IS HERE **
+        # We get chat_id from our stored quiz_info, not from the update object
+        chat_id = quiz_info["chat_id"]
+        
+        user_data['questions_queue'].pop(0)
+        user_data['questions_answered'] += 1
+        
         time_taken = time.time() - quiz_info['time_sent']
         is_correct = answer.option_ids[0] == quiz_info["correct_option_id"]
-        await process_answered_poll(update, context, poll_id, is_correct, time_taken)
+        
+        points = 0
+        if is_correct:
+            user_data['correct_answers'] += 1
+            speed_bonus = calculate_points(time_taken)
+            points = POINTS_CORRECT + speed_bonus
+            await context.bot.send_message(chat_id, f"✅ Correct! +{points} pts (+{speed_bonus} bonus)")
+        else:
+            user_data['wrong_answers'] += 1
+            points = POINTS_WRONG_PENALTY
+            await context.bot.send_message(chat_id, f"❌ Wrong! {points} pts")
+        
+        user_data['total_score'] += points
+        await asyncio.sleep(2)
+        await send_next_question(chat_id, context)
 
 async def poll_timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     poll_id = update.poll.id
     if poll_id in context.bot_data and update.poll.is_closed:
         quiz_info = context.bot_data.pop(poll_id)
         chat_id = quiz_info["chat_id"]
-        user_data = context.user_data
-        
-        question_id = user_data['questions_queue'].pop(0)
+        await handle_poll_closure(chat_id, context, quiz_info)
 
-        if quiz_info.get('postponed'):
-            user_data['questions_queue'].append(question_id)
-            user_data[f"is_postponed_{question_id}"] = True
-            await context.bot.send_message(chat_id, "Question postponed to the end.", protect_content=True)
-        elif quiz_info.get('skipped'):
-            user_data['questions_answered'] += 1
-            await context.bot.send_message(chat_id, "Question skipped permanently.", protect_content=True)
-        elif quiz_info.get('stopped'):
-            return # Stop command already handled it
-        else: # Regular timeout
-            user_data['questions_answered'] += 1
-            await context.bot.send_message(chat_id, "⌛️ Time's up! No points awarded.", protect_content=True)
+async def handle_poll_closure(chat_id, context, quiz_info):
+    """A new central function to handle any poll that closes, for any reason."""
+    user_data = context.user_data
+    question_id = user_data['questions_queue'].pop(0)
 
-        await asyncio.sleep(1.5)
-        await send_next_question(chat_id, context)
+    if quiz_info.get('postponed'):
+        user_data['questions_queue'].append(question_id)
+        user_data[f"is_postponed_{question_id}"] = True
+        await context.bot.send_message(chat_id, "Question postponed to the end.")
+    elif quiz_info.get('skipped'):
+        user_data['questions_answered'] += 1
+        await context.bot.send_message(chat_id, "Question skipped permanently.")
+    elif quiz_info.get('stopped'):
+        return # Stop command shows the score, so we do nothing here
+    else: # Regular timeout
+        user_data['questions_answered'] += 1
+        await context.bot.send_message(chat_id, "⌛️ Time's up! No points awarded.")
+
+    await asyncio.sleep(1.5)
+    await send_next_question(chat_id, context)
 
 async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_data = context.user_data
@@ -208,8 +202,7 @@ async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     correct = user_data.get('correct_answers', 0)
     answered = user_data.get('questions_answered', 0)
     
-    accuracy_bonus = 0
-    accuracy = 0
+    accuracy_bonus = 0; accuracy = 0
     if answered > 0:
         accuracy = (correct / answered) * 100
         accuracy_bonus = int(total_score * (accuracy / 100) * 0.1) if total_score > 0 else 0
@@ -221,7 +214,7 @@ async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Base Score: `{total_score}`\n"
         f"Accuracy: `{accuracy:.1f}%` (+`{accuracy_bonus}` bonus)\n"
         f"**Final Score: `{final_score}`**\n\n"
-        f"Correct Answers: `{correct}/{answered}`"
+        f"Correct: `{correct}` | Wrong/Missed: `{answered - correct}`"
     )
     keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data='try_again')]]
     await context.bot.send_message(
