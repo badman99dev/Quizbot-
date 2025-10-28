@@ -1,169 +1,237 @@
 import asyncio
 import logging
 import os
+import random
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, PollHandler, PollAnswerHandler, ContextTypes
 
 # --- Configuration ---
-QUIZ_NAME = "12th Test"
+QUIZ_NAME = "Advanced Test"
 QUESTIONS_PER_QUIZ = 5
 SECONDS_PER_QUESTION = 15
 
+# --- Scoring Configuration ---
+POINTS_CORRECT = 100
+POINTS_WRONG_PENALTY = -25
+MAX_SPEED_BONUS = 50
+
 # --- Dummy Questions ---
 dummy_questions = [
-    {"question": "भारत की राजधानी क्या है?", "options": ["मुंबई", "नई दिल्ली", "चेन्नई", "कोलकाता"], "correct_option_id": 1},
-    {"question": "Python में लिस्ट बनाने के लिए किस ब्रैकेट का उपयोग किया जाता है?", "options": ["{}", "()", "[]", "<>"], "correct_option_id": 2},
-    {"question": "सूर्य किस दिशा में उगता है?", "options": ["पश्चिम", "उत्तर", "पूर्व", "दक्षिण"], "correct_option_id": 2},
-    {"question": "1 KB में कितने बाइट्स होते हैं?", "options": ["1000", "1024", "2048", "512"], "correct_option_id": 1},
-    {"question": "इनमें से कौन सा एक सर्च इंजन नहीं है?", "options": ["Google", "Yahoo", "Instagram", "Bing"], "correct_option_id": 2}
+    {"id": "q1", "question": "भारत की राजधानी क्या है?", "options": ["मुंबई", "नई दिल्ली", "चेन्नई", "कोलकाता"], "correct_option_id": 1},
+    {"id": "q2", "question": "Python में लिस्ट बनाने के लिए किस ब्रैकेट का उपयोग किया जाता है?", "options": ["{}", "()", "[]", "<>"], "correct_option_id": 2},
+    {"id": "q3", "question": "सूर्य किस दिशा में उगता है?", "options": ["पश्चिम", "उत्तर", "पूर्व", "दक्षिण"], "correct_option_id": 2},
+    {"id": "q4", "question": "1 KB में कितने बाइट्स होते हैं?", "options": ["1000", "1024", "2048", "512"], "correct_option_id": 1},
+    {"id": "q5", "question": "इनमें से कौन सा एक सर्च इंजन नहीं है?", "options": ["Google", "Yahoo", "Instagram", "Bing"], "correct_option_id": 2}
 ]
 
 # --- Bot Logic ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Helper Functions ---
+def get_question_by_id(qid):
+    return next((q for q in dummy_questions if q["id"] == qid), None)
+
+def calculate_points(time_taken):
+    if time_taken < 2: return MAX_SPEED_BONUS
+    if time_taken >= SECONDS_PER_QUESTION: return 0
+    bonus = MAX_SPEED_BONUS * (1 - (time_taken / SECONDS_PER_QUESTION))
+    return int(bonus)
+
+# --- Core Bot Functions ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
     keyboard = [[InlineKeyboardButton("✅ I'm ready!", callback_data='start_quiz')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"🎲 Get ready for the quiz '{QUIZ_NAME}'\n\n"
-        f"🖊 {QUESTIONS_PER_QUIZ} questions\n"
-        f"⏱ {SECONDS_PER_QUESTION} seconds per question\n\n"
-        f"🏁 Press the button below when you are ready.",
-        reply_markup=reply_markup
+        f"🎲 Welcome to the '{QUIZ_NAME}'!\n\n"
+        f"This quiz features an advanced scoring system:\n"
+        f"• **Correct:** `{POINTS_CORRECT}` pts\n"
+        f"• **Wrong:** `{POINTS_WRONG_PENALTY}` pts\n"
+        f"• **Speed Bonus:** Up to `{MAX_SPEED_BONUS}` pts\n\n"
+        f"Press the button when you are ready to start!",
+        reply_markup=reply_markup, parse_mode='Markdown'
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    if query.data == 'start_quiz':
+    data = query.data
+    chat_id = update.effective_chat.id
+    user_data = context.user_data
+
+    if data == 'start_quiz':
         await query.edit_message_text(text="🚀 Getting the quiz ready...")
-        context.user_data.update({
-            'current_question_index': 0, 'correct_answers': 0, 'wrong_answers': 0,
-            'quiz_start_time': asyncio.get_event_loop().time(),
+        shuffled_questions = random.sample(dummy_questions, k=QUESTIONS_PER_QUIZ)
+        user_data.update({
+            'questions_queue': [q['id'] for q in shuffled_questions], 'questions_answered': 0,
+            'total_score': 0, 'correct_answers': 0, 'wrong_answers': 0,
+            'quiz_start_time': time.time(), 'active_poll_message_id': None, 'active_poll_id': None
         })
-        await start_countdown_and_quiz(update.effective_chat.id, context)
-    elif query.data == 'try_again':
+        await start_countdown_and_quiz(chat_id, context)
+    
+    elif data in ['postpone_question', 'skip_permanently', 'stop_quiz']:
+        if user_data.get('active_poll_message_id'):
+            try:
+                await context.bot.stop_poll(chat_id, user_data['active_poll_message_id'])
+                current_poll_id = user_data.get('active_poll_id')
+                if current_poll_id in context.bot_data:
+                    if data == 'postpone_question':
+                        context.bot_data[current_poll_id]['postponed'] = True
+                    elif data == 'skip_permanently':
+                        context.bot_data[current_poll_id]['skipped'] = True
+                    elif data == 'stop_quiz':
+                        context.bot_data[current_poll_id]['stopped'] = True
+                        await query.message.delete()
+                        await show_final_score(chat_id, context)
+            except BadRequest as e:
+                logger.warning(f"Could not stop poll (likely already closed): {e}")
+    
+    elif data == 'try_again':
         await query.message.delete()
         await start_command(update.effective_message, context)
 
-# --- FEATURE 1: Animated Countdown ---
+
 async def start_countdown_and_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a single message and edits it to create a countdown animation."""
-    await context.bot.send_chat_action(chat_id, action='typing')
     msg = await context.bot.send_message(chat_id, text="Get Ready... 3️⃣")
-    await asyncio.sleep(1)
-    await msg.edit_text("Get Ready... 2️⃣")
-    await asyncio.sleep(1)
-    await msg.edit_text("Get Ready... 1️⃣")
-    await asyncio.sleep(1)
-    await msg.edit_text("🚦 GO!")
-    await asyncio.sleep(0.5)
-    await msg.delete()
+    await asyncio.sleep(1); await msg.edit_text("Get Ready... 2️⃣")
+    await asyncio.sleep(1); await msg.edit_text("Get Ready... 1️⃣")
+    await asyncio.sleep(1); await msg.edit_text("🚦 GO!")
+    await asyncio.sleep(0.5); await msg.delete()
     await send_next_question(chat_id, context)
 
 async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the next question with a progress bar or the final score."""
-    current_index = context.user_data.get('current_question_index', 0)
+    user_data = context.user_data
+    
+    # --- FINAL WIPE/DELETE EFFECT ---
+    # Delete the previous question's poll message if it exists
+    if user_data.get('active_poll_message_id'):
+        try:
+            await context.bot.delete_message(chat_id, user_data['active_poll_message_id'])
+        except BadRequest as e:
+            logger.info(f"Could not delete previous poll message (already deleted?): {e}")
+        user_data['active_poll_message_id'] = None
 
-    if current_index < QUESTIONS_PER_QUIZ:
-        # --- FEATURE 2: Progress Bar ---
-        progress = int(((current_index + 1) / QUESTIONS_PER_QUIZ) * 10)
-        progress_bar = '🟩' * progress + '⬜️' * (10 - progress)
-
-        question_data = dummy_questions[current_index]
-        question_text = (
-            f"Question {current_index + 1}/{QUESTIONS_PER_QUIZ}\n"
-            f"{progress_bar}\n\n"
-            f"{question_data['question']}"
-        )
-
-        # --- FEATURE 3: Typing Indicator ---
-        await context.bot.send_chat_action(chat_id, action='typing')
-        message = await context.bot.send_poll(
-            chat_id=chat_id,
-            question=question_text,
-            options=question_data["options"],
-            type='quiz',
-            correct_option_id=question_data["correct_option_id"],
-            open_period=SECONDS_PER_QUESTION,
-            is_anonymous=False
-        )
-        context.bot_data[message.poll.id] = {
-            "chat_id": chat_id, "correct_option_id": question_data["correct_option_id"],
-            "question_index": current_index
-        }
-    else:
+    if not user_data.get('questions_queue'):
         await show_final_score(chat_id, context)
+        return
+
+    question_id = user_data['questions_queue'][0]
+    question_data = get_question_by_id(question_id)
+    
+    current_q_num = user_data.get('questions_answered', 0) + 1
+
+    is_postponed = user_data.get(f"is_postponed_{question_id}", False)
+    
+    keyboard = [[InlineKeyboardButton("⏹️ Stop Quiz", callback_data='stop_quiz')]]
+    if is_postponed:
+        keyboard[0].append(InlineKeyboardButton("⏩ Skip Permanently", callback_data='skip_permanently'))
+    else:
+        keyboard[0].append(InlineKeyboardButton("➡️ Postpone", callback_data='postpone_question'))
+
+    message = await context.bot.send_poll(
+        chat_id=chat_id,
+        question=f"Question {current_q_num}/{QUESTIONS_PER_QUIZ}\n\n{question_data['question']}",
+        options=question_data["options"], type='quiz', correct_option_id=question_data["correct_option_id"],
+        open_period=SECONDS_PER_QUESTION, is_anonymous=False, reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
+    user_data['active_poll_message_id'] = message.message_id
+    user_data['active_poll_id'] = message.poll.id
+    context.bot_data[message.poll.id] = {
+        "chat_id": chat_id, "correct_option_id": question_data["correct_option_id"],
+        "question_id": question_id, "time_sent": time.time()
+    }
+
+async def process_answered_poll(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: str, is_correct: bool, time_taken: float):
+    user_data = context.user_data
+    chat_id = update.effective_chat.id
+    
+    user_data['questions_queue'].pop(0)
+    user_data['questions_answered'] += 1
+    
+    points = 0
+    if is_correct:
+        user_data['correct_answers'] += 1
+        speed_bonus = calculate_points(time_taken)
+        points = POINTS_CORRECT + speed_bonus
+        await context.bot.send_message(chat_id, f"✅ Correct! +{points} points (+{speed_bonus} speed bonus)", protect_content=True)
+    else:
+        user_data['wrong_answers'] += 1
+        points = POINTS_WRONG_PENALTY
+        await context.bot.send_message(chat_id, f"❌ Wrong! {points} points", protect_content=True)
+    
+    user_data['total_score'] += points
+    await asyncio.sleep(2)
+    await send_next_question(chat_id, context)
 
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     answer = update.poll_answer
     poll_id = answer.poll_id
+
     if poll_id in context.bot_data:
         quiz_info = context.bot_data.pop(poll_id)
-        chat_id = quiz_info["chat_id"]
-        if quiz_info["question_index"] != context.user_data.get('current_question_index'):
-            return
-        if answer.option_ids[0] == quiz_info["correct_option_id"]:
-            context.user_data['correct_answers'] += 1
-        else:
-            context.user_data['wrong_answers'] += 1
-        context.user_data['current_question_index'] += 1
-        await asyncio.sleep(1.5)
-        await send_next_question(chat_id, context)
+        time_taken = time.time() - quiz_info['time_sent']
+        is_correct = answer.option_ids[0] == quiz_info["correct_option_id"]
+        await process_answered_poll(update, context, poll_id, is_correct, time_taken)
 
 async def poll_timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     poll_id = update.poll.id
     if poll_id in context.bot_data and update.poll.is_closed:
         quiz_info = context.bot_data.pop(poll_id)
         chat_id = quiz_info["chat_id"]
-        if quiz_info["question_index"] != context.user_data.get('current_question_index'):
-            return
-        logger.info(f"Poll {poll_id} timed out.")
-        context.user_data['current_question_index'] += 1
+        user_data = context.user_data
+        
+        question_id = user_data['questions_queue'].pop(0)
+
+        if quiz_info.get('postponed'):
+            user_data['questions_queue'].append(question_id)
+            user_data[f"is_postponed_{question_id}"] = True
+            await context.bot.send_message(chat_id, "Question postponed to the end.", protect_content=True)
+        elif quiz_info.get('skipped'):
+            user_data['questions_answered'] += 1
+            await context.bot.send_message(chat_id, "Question skipped permanently.", protect_content=True)
+        elif quiz_info.get('stopped'):
+            return # Stop command already handled it
+        else: # Regular timeout
+            user_data['questions_answered'] += 1
+            await context.bot.send_message(chat_id, "⌛️ Time's up! No points awarded.", protect_content=True)
+
+        await asyncio.sleep(1.5)
         await send_next_question(chat_id, context)
 
 async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Calculates and shows the final score with better emojis and a dynamic button."""
-    correct = context.user_data.get('correct_answers', 0)
-    wrong = context.user_data.get('wrong_answers', 0)
-    total_answered = correct + wrong
-    missed = QUESTIONS_PER_QUIZ - total_answered
-    end_time = asyncio.get_event_loop().time()
-    total_time = round(end_time - context.user_data.get('quiz_start_time', 0))
-
-    # --- FEATURE 4: Better Emojis in Score ---
+    user_data = context.user_data
+    total_score = user_data.get('total_score', 0)
+    correct = user_data.get('correct_answers', 0)
+    answered = user_data.get('questions_answered', 0)
+    
+    accuracy_bonus = 0
+    accuracy = 0
+    if answered > 0:
+        accuracy = (correct / answered) * 100
+        accuracy_bonus = int(total_score * (accuracy / 100) * 0.1) if total_score > 0 else 0
+    
+    final_score = total_score + accuracy_bonus
+    
     score_text = (
-        f"🏁 **The quiz has finished!** 🏆\n\n"
-        f"Here's your score:\n\n"
-        f"✅ **Correct** – `{correct}`\n"
-        f"❌ **Wrong** – `{wrong}`\n"
-        f"⌛️ **Missed** – `{missed}`\n"
-        f"⏱ **Total Time** – `{total_time} sec`\n\n"
-        "Great effort!"
+        f"🏁 **Quiz Over!** 🏆\n\n"
+        f"Base Score: `{total_score}`\n"
+        f"Accuracy: `{accuracy:.1f}%` (+`{accuracy_bonus}` bonus)\n"
+        f"**Final Score: `{final_score}`**\n\n"
+        f"Correct Answers: `{correct}/{answered}`"
     )
     keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data='try_again')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await context.bot.send_chat_action(chat_id, action='typing')
-    msg = await context.bot.send_message(
-        chat_id, text=score_text, reply_markup=reply_markup, parse_mode='Markdown'
+    await context.bot.send_message(
+        chat_id, text=score_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
     )
-    context.user_data.clear()
-
-    # --- FEATURE 5: Dynamic "Try Again" Button ---
-    await asyncio.sleep(10) # Wait for 10 seconds
-    try:
-        new_keyboard = [[InlineKeyboardButton("🏆 Go for a better score!", callback_data='try_again')]]
-        await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
-    except Exception as e:
-        logger.info(f"Could not edit the 'Try Again' button, probably it was interacted with: {e}")
+    user_data.clear()
 
 def main() -> None:
     TOKEN = os.getenv("TELEGRAM_TOKEN")
-    if not TOKEN:
-        raise ValueError("Error: TELEGRAM_TOKEN environment variable is not set!")
+    if not TOKEN: raise ValueError("TELEGRAM_TOKEN not set!")
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_callback))
