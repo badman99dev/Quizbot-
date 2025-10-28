@@ -1,7 +1,8 @@
-
 import logging
 import os
 import json
+import asyncio
+from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, PollHandler, PollAnswerHandler, ContextTypes
@@ -15,7 +16,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # This dictionary will hold active quiz sessions, with chat_id as the key.
-# This allows the bot to handle multiple users playing at the same time.
 ACTIVE_SESSIONS = {}
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -52,13 +52,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("<b>Error:</b> Requested quiz bank not available.", parse_mode='HTML')
             return
 
-        # Clean up previous messages
+        # *** THE FIX IS HERE: Added parse_mode='HTML' ***
         if action == 'try_again':
             try: await query.message.delete()
             except BadRequest: pass
-            await context.bot.send_message(chat_id, text=f"🚀 Getting the '<b>{quiz_data['name']}</b>' quiz ready...")
+            await context.bot.send_message(chat_id, text=f"🚀 Getting the '<b>{escape(quiz_data['name'])}</b>' quiz ready...", parse_mode='HTML')
         else:
-            await query.edit_message_text(text=f"🚀 Getting the '<b>{quiz_data['name']}</b>' quiz ready...")
+            await query.edit_message_text(text=f"🚀 Getting the '<b>{escape(quiz_data['name'])}</b>' quiz ready...", parse_mode='HTML')
 
         # Create and start a new game session
         session = QuizSession(context, chat_id, set_id, quiz_data)
