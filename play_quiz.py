@@ -1,9 +1,3 @@
-# play_quiz.py
-
-
-#This module is the "Game Master". It contains the QuizSession class which manages an active quiz from start to finish for a single user.
-
-
 import asyncio
 import time
 import os
@@ -13,7 +7,10 @@ from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
-from quiz_manager import get_quiz_set
+import logging
+
+# We don't need to import get_quiz_set here as it's handled by bot.py
+# from quiz_manager import get_quiz_set
 
 # --- Constants ---
 SECONDS_PER_QUESTION = 15
@@ -37,7 +34,7 @@ class QuizSession:
         self.chat_id = chat_id
         self.set_id = set_id
         self.quiz_name = quiz_data['name']
-        self.questions_data = quiz_data['questions']
+        self.questions_data = list(quiz_data['questions']) # Create a mutable copy
         
         # Shuffle the questions for this session
         random.shuffle(self.questions_data)
@@ -50,16 +47,23 @@ class QuizSession:
         self.session_id = f"{chat_id}_{int(time.time())}"
 
     async def start(self):
-        """Starts the quiz with a countdown."""
-        msg = await self.context.bot.send_message(self.chat_id, text="Get Ready... 3️⃣")
-        await asyncio.sleep(1)
-        await msg.edit_text("Get Ready... 2️⃣")
-        await asyncio.sleep(1)
-        await msg.edit_text("Get Ready... 1️⃣")
-        await asyncio.sleep(1)
-        await msg.edit_text("🚦 GO!")
-        await asyncio.sleep(0.5)
-        await msg.delete()
+        """Starts the quiz with a more robust and smooth countdown."""
+        # *** THE FIX IS HERE: More robust countdown logic ***
+        try:
+            msg = await self.context.bot.send_message(self.chat_id, text="Get Ready... 3️⃣")
+            await asyncio.sleep(1.1)
+            await msg.edit_text("Get Ready... 2️⃣")
+            await asyncio.sleep(1.1)
+            await msg.edit_text("Get Ready... 1️⃣")
+            await asyncio.sleep(1.1)
+            await msg.edit_text("🚦 GO!")
+            await asyncio.sleep(0.5)
+            await msg.delete()
+        except BadRequest as e:
+            # If the user stops the bot or something unexpected happens during the countdown,
+            # we just log it and continue to the first question.
+            logging.warning(f"Countdown message handling error: {e}")
+
         await self.send_next_question()
 
     async def send_next_question(self):
@@ -141,9 +145,7 @@ class QuizSession:
         status = 'timed_out'
         
         if quiz_info.get('postponed'):
-            self.questions_queue.append(question_id)
-            setattr(self, f"is_postponed_{question_id}", True)
-            status = 'postponed'
+            self.questions_queue.append(question_id); setattr(self, f"is_postponed_{question_id}", True); status = 'postponed'
         elif quiz_info.get('skipped'):
             status = 'skipped'
         elif stopped:
@@ -176,12 +178,10 @@ class QuizSession:
         correct_count = sum(1 for r in self.results if r['status'] == 'correct')
         wrong_count = sum(1 for r in self.results if r['status'] == 'wrong')
         
-        score_text = (
-            f"⫷ 🏆 <b>𝐅𝐈𝐍𝐀𝐋 𝐒𝐂𝐎𝐑𝐄 » {escape(self.quiz_name)}</b> 🏆 ⫸\n\n"
-            f"    ✅ Correct       »  <code>{correct_count}</code>\n"
-            f"    ❌ Wrong         »  <code>{wrong_count}</code>\n\n"
-            f"    ✪ <b>Total Points</b>  »  <code>{self.total_score}</code>"
-        )
+        score_text = (f"⫷ 🏆 <b>𝐅𝐈𝐍𝐀𝐋 𝐒𝐂𝐎𝐑𝐄 » {escape(self.quiz_name)}</b> 🏆 ⫸\n\n"
+                      f"    ✅ Correct       »  <code>{correct_count}</code>\n"
+                      f"    ❌ Wrong         »  <code>{wrong_count}</code>\n\n"
+                      f"    ✪ <b>Total Points</b>  »  <code>{self.total_score}</code>")
         
         keyboard = [
             [InlineKeyboardButton("📊 Detailed Review", callback_data=f'detailed_review:{self.session_id}')],
@@ -193,4 +193,4 @@ class QuizSession:
             text=score_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
-      )
+        )
