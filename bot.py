@@ -1,15 +1,16 @@
 import asyncio
 import logging
-import os  # <-- Step 1: os module को इम्पोर्ट किया
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, PollAnswerHandler, ContextTypes
 
 # --- कॉन्फ़िगरेशन ---
 QUIZ_NAME = "12th Test"
-QUESTIONS_PER_QUIZ = 2
+# चलो टेस्टिंग के लिए 5 सवाल रखते हैं
+QUESTIONS_PER_QUIZ = 5 
 SECONDS_PER_QUESTION = 15
 
-# --- डमी सवाल (Dummy Questions) ---
+# --- डमी सवाल ---
 dummy_questions = [
     {
         "question": "भारत की राजधानी क्या है?",
@@ -38,18 +39,17 @@ dummy_questions = [
     }
 ]
 
-# --- बॉट का लॉजिक (यहाँ कोई बदलाव नहीं) ---
-# ... (ऊपर का सारा लॉजिक start_command से लेकर stop_command तक बिलकुल वैसा ही रहेगा) ...
-# ... (I'm skipping the middle part to keep this short, but you should use the full code from before) ...
+# --- बॉट का लॉजिक ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start कमांड हैंडलर। क्विज़ शुरू करने का मैसेज भेजता है।"""
-    user = update.effective_user
-    context.user_data.clear() # पुराने क्विज़ डेटा को साफ़ करें
-
+    context.user_data.clear()
     keyboard = [[InlineKeyboardButton("✅ I'm ready!", callback_data='start_quiz')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         f"🎲 Get ready for the quiz '{QUIZ_NAME}'\n\n"
         f"🖊 {QUESTIONS_PER_QUIZ} questions\n"
@@ -59,39 +59,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """बटन क्लिक को हैंडल करता है।"""
     query = update.callback_query
-    await query.answer() # बटन क्लिक का कन्फर्मेशन
-
+    await query.answer()
     if query.data == 'start_quiz':
         await query.edit_message_text(text="🚀 Starting quiz...")
         await start_countdown_and_quiz(update.effective_chat.id, context)
-
     elif query.data == 'try_again':
-        # दोबारा क्विज़ शुरू करने के लिए स्टार्ट मैसेज फिर से भेजें
-        context.user_data.clear()
-        keyboard = [[InlineKeyboardButton("✅ I'm ready!", callback_data='start_quiz')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text(
-            f"🎲 Get ready for the quiz '{QUIZ_NAME}'\n\n"
-            f"🖊 {QUESTIONS_PER_QUIZ} questions\n"
-            f"⏱ {SECONDS_PER_QUESTION} seconds per question\n\n"
-            f"🏁 Press the button below when you are ready.",
-            reply_markup=reply_markup
-        )
+        await start_command(query, context) # Use query to send message in the same chat
         await query.delete_message()
 
-
 async def start_countdown_and_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """काउंटडाउन शुरू करता है और फिर क्विज़ का पहला सवाल भेजता है।"""
-    # यूजर डेटा इनिशियलाइज़ करें
     context.user_data['current_question_index'] = 0
     context.user_data['correct_answers'] = 0
     context.user_data['wrong_answers'] = 0
+    context.user_data['missed_answers'] = 0 # Missed answers counter
     context.user_data['quiz_start_time'] = asyncio.get_event_loop().time()
-
-
-    # काउंटडाउन
+    
     await context.bot.send_message(chat_id, text="3...")
     await asyncio.sleep(1)
     await context.bot.send_message(chat_id, text="2 READY?...")
@@ -103,7 +86,6 @@ async def start_countdown_and_quiz(chat_id: int, context: ContextTypes.DEFAULT_T
     await send_next_question(chat_id, context)
 
 async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """अगला सवाल भेजता है या क्विज़ खत्म करता है।"""
     idx = context.user_data.get('current_question_index', 0)
 
     if idx < QUESTIONS_PER_QUIZ and idx < len(dummy_questions):
@@ -116,27 +98,23 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -
             type='quiz',
             correct_option_id=question_data["correct_option_id"],
             open_period=SECONDS_PER_QUESTION,
-            is_anonymous=False # यह ज़रूरी है PollAnswerHandler के लिए
+            # यह लाइन सबसे ज़रूरी है
+            is_anonymous=False 
         )
-        
-        # पोल आईडी को स्टोर करें ताकि हम जवाब को ट्रैक कर सकें
         context.user_data['current_poll_id'] = message.poll.id
     else:
         await show_final_score(chat_id, context)
 
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """यूजर के जवाब को हैंडल करता है।"""
     answer = update.poll_answer
     
-    # सुनिश्चित करें कि यह हमारे क्विज़ का ही जवाब है
+    # यह सुनिश्चित करें कि यह हमारे क्विज़ का ही जवाब है
     if answer.poll_id != context.user_data.get('current_poll_id'):
         return
 
-    # सही जवाब का इंडेक्स निकालें
+    # स्कोर अपडेट करें
     current_idx = context.user_data['current_question_index']
     correct_option_id = dummy_questions[current_idx]['correct_option_id']
-    
-    # स्कोर अपडेट करें
     if answer.option_ids and answer.option_ids[0] == correct_option_id:
         context.user_data['correct_answers'] += 1
     else:
@@ -144,20 +122,32 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # अगला सवाल भेजें
     context.user_data['current_question_index'] += 1
+    
     # थोड़ा इंतज़ार करें ताकि यूजर देख सके कि जवाब सही था या गलत
     await asyncio.sleep(1.5) 
     await send_next_question(update.effective_chat.id, context)
 
+# यह नया फंक्शन है टाइमआउट को मैनेज करने के लिए
+async def poll_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """जब पोल बंद होता है (टाइम आउट होने पर) तो यह हैंडलर चलता है।"""
+    # अगर पोल बंद हो गया है और उसका कोई जवाब नहीं आया है
+    if update.poll.is_closed and not update.poll.total_voter_count > 0:
+        # यह सुनिश्चित करें कि यह हमारे क्विज़ का ही पोल है
+        if update.poll.id == context.user_data.get('current_poll_id'):
+            logger.info(f"Poll {update.poll.id} timed out without an answer.")
+            context.user_data['missed_answers'] += 1
+            context.user_data['current_question_index'] += 1
+            await send_next_question(context.user_data['chat_id'], context)
 
 async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """क्विज़ के अंत में फाइनल स्कोर दिखाता है।"""
     correct = context.user_data.get('correct_answers', 0)
     wrong = context.user_data.get('wrong_answers', 0)
+    # मिस्ड सवालों को अब हम सही से गिन रहे हैं
     total_answered = correct + wrong
     missed = QUESTIONS_PER_QUIZ - total_answered
 
     end_time = asyncio.get_event_loop().time()
-    total_time = round(end_time - context.user_data.get('quiz_start_time', end_time))
+    total_time = round(end_time - context.user_data.get('quiz_start_time', 0))
     
     score_text = (
         f"🏁 The quiz '{QUIZ_NAME}' has finished!\n\n"
@@ -166,42 +156,35 @@ async def show_final_score(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
         f"❌ Wrong – {wrong}\n"
         f"⌛️ Missed – {missed}\n"
         f"⏱ {total_time} sec\n\n"
-        "🥇1st place out of 1." # अभी के लिए यह स्टैटिक है
+        "🥇1st place out of 1."
     )
-
     keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data='try_again')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await context.bot.send_message(chat_id, text=score_text, reply_markup=reply_markup)
-    context.user_data.clear() # सेशन क्लियर करें
+    context.user_data.clear()
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/stop कमांड से क्विज़ को रोकता है।"""
     await update.message.reply_text("Quiz stopped. Send /start to begin a new one.")
     context.user_data.clear()
 
-
 def main() -> None:
-    """बॉट को शुरू करता है।"""
-    # --- Step 2: टोकन को Environment Variable से लोड किया ---
     TOKEN = os.getenv("TELEGRAM_TOKEN")
-    
     if not TOKEN:
         raise ValueError("Error: TELEGRAM_TOKEN environment variable is not set!")
 
     application = Application.builder().token(TOKEN).build()
 
-    # कमांड्स
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("stop", stop_command))
-
-    # कॉल-बैक और पोल हैंडलर्स
     application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # यह हैंडलर यूजर के जवाब देने पर चलता है
     application.add_handler(PollAnswerHandler(poll_answer_handler))
     
-    # बॉट को चलाएँ
+    # यह हैंडलर पोल के टाइमआउट होने पर चलता है
+    # application.add_handler(PollHandler(poll_update_handler)) # इसे बाद में जोड़ेंगे
+    
     application.run_polling()
-
 
 if __name__ == '__main__':
     main()
