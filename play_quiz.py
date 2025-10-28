@@ -1,14 +1,14 @@
 # play_quiz.py
 
-"""
-This module is the "Game Master". It contains the QuizSession class
-which manages an active quiz from start to finish for a single user.
-"""
+
+#This module is the "Game Master". It contains the QuizSession class which manages an active quiz from start to finish for a single user.
+
 
 import asyncio
 import time
 import os
 import json
+import random
 from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
